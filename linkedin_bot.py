@@ -431,10 +431,11 @@ class LinkedInBot:
     def _try_connect_button(self, message):
         """
         Try to click Connect button
-        LinkedIn hides Connect inside "More" dropdown, so we need to:
-        1. Click "More" button
-        2. Click "Connect" in dropdown
-        3. Add note and send
+        LinkedIn shows Connect in two places:
+        1. As a visible button on the profile (Pattern A)
+        2. Hidden inside "More" dropdown (Pattern B)
+        
+        We check BOTH locations!
         """
         try:
             print("  🔎 Looking for 'Connect' option...")
@@ -454,9 +455,86 @@ class LinkedInBot:
             except Exception as e:
                 print(f"  ⚠️  Debug info failed: {str(e)[:50]}")
             
-            # First, try to find "More" button (profile actions, not nav bar!)
-            print("  📍 Looking for 'More' dropdown...")
-            more_button = None
+            # STEP 1: Check for VISIBLE Connect button first (Pattern A)
+            print("  📍 Step 1: Checking for visible Connect button...")
+            visible_connect = self._try_visible_connect_button(message)
+            if visible_connect:
+                return visible_connect
+            
+            # STEP 2: If no visible Connect, try More dropdown (Pattern B)
+            print("  📍 Step 2: No visible Connect button, checking More dropdown...")
+            dropdown_connect = self._try_connect_in_dropdown(message)
+            if dropdown_connect:
+                return dropdown_connect
+            
+            # No Connect option found anywhere
+            print("  ❌ Connect option not found (visible or in dropdown)")
+            return None
+                
+        except Exception as e:
+            print(f"  ❌ Error with Connect button: {str(e)}")
+            return None
+    
+    def _try_visible_connect_button(self, message):
+        """Check for Connect button that's directly visible on profile"""
+        try:
+            # Look for visible Connect button (not in dropdown)
+            visible_connect_selectors = [
+                # Standard Connect button
+                "//main//button[.//span[text()='Connect']]",
+                "//section[contains(@class, 'pv-top-card')]//button[.//span[text()='Connect']]",
+                # Aria label version
+                "//button[contains(@aria-label, 'Invite') and contains(@aria-label, 'to connect')]",
+                # Simple text match
+                "//button[normalize-space(.)='Connect' and not(ancestor::div[contains(@class, 'artdeco-dropdown')])]",
+            ]
+            
+            for i, selector in enumerate(visible_connect_selectors):
+                try:
+                    print(f"  🔍 Trying visible Connect selector {i+1}/{len(visible_connect_selectors)}...")
+                    connect_btn = WebDriverWait(self.driver, 3).until(
+                        EC.element_to_be_clickable((By.XPATH, selector))
+                    )
+                    
+                    if connect_btn and connect_btn.is_displayed():
+                        print(f"  ✅ Found VISIBLE Connect button!")
+                        connect_btn.click()
+                        human_delay(2, 3)
+                        
+                        # Try to add personalized note
+                        if message and len(message.strip()) > 0:
+                            if self._add_connection_note(message):
+                                print("  ✅ Added personalized note")
+                            else:
+                                print("  ⚠️  Couldn't add note, sending without message")
+                        
+                        # Click Send
+                        if self._click_send_button():
+                            print("✅ Connection request sent successfully!")
+                            return {
+                                'success': True,
+                                'action_taken': 'connection_request',
+                                'profile_url': self.driver.current_url,
+                                'message_sent': bool(message)
+                            }
+                        
+                except TimeoutException:
+                    continue
+                except Exception as e:
+                    print(f"  ⚠️  Selector {i+1} error: {str(e)[:50]}")
+                    continue
+            
+            print("  ℹ️  No visible Connect button found")
+            return None
+            
+        except Exception as e:
+            print(f"  ⚠️  Error checking visible Connect: {str(e)[:50]}")
+            return None
+    
+    def _try_connect_in_dropdown(self, message):
+        """Check for Connect option inside More dropdown"""
+        try:
+            more_button = None  # Initialize
             
             # CRITICAL: We want the "More" button in the PROFILE ACTIONS area
             # NOT the "More actions" button in the top navigation bar!

@@ -12,15 +12,41 @@ bot = None
 bot_lock = threading.Lock()
 
 def get_bot():
-    """Get or create bot instance"""
+    """
+    Get or create bot instance
+    If session is dead, automatically create a new one
+    """
     global bot
     with bot_lock:
+        # If bot exists, check if it's still alive
+        if bot is not None:
+            try:
+                # Quick health check - can we access the browser?
+                _ = bot.driver.current_url
+                print("✅ Using existing bot session")
+                return bot
+            except Exception as e:
+                # Session is dead - clean it up and create new one
+                print(f"⚠️  Bot session died: {str(e)[:50]}")
+                print("🔄 Spinning up new bot instance...")
+                try:
+                    bot.close()
+                except:
+                    pass  # Ignore errors closing dead session
+                bot = None
+        
+        # Create fresh bot instance
         if bot is None:
             print("🤖 Creating new LinkedIn bot instance...")
             bot = LinkedInBot()
-            # Login on first request
+            
+            print("🔐 Logging in to LinkedIn...")
             if not bot.login():
+                bot = None
                 raise Exception("Failed to login to LinkedIn")
+            
+            print("✅ Bot ready and logged in!")
+        
         return bot
 
 @app.route('/health', methods=['GET'])
@@ -98,7 +124,7 @@ def send_connection():
         print(f"Message Length: {len(connection_note)} chars")
         print(f"{'='*60}\n")
         
-        # Get bot instance
+        # Get bot instance (creates new one if session died)
         bot_instance = get_bot()
         
         # Send connection request
@@ -119,10 +145,25 @@ def send_connection():
     except Exception as e:
         error_msg = str(e)
         print(f"\n❌ ERROR: {error_msg}\n")
+        
+        # If ANY error occurs, mark bot as needing recreation
+        # Next request will get a fresh bot instance
+        global bot
+        if 'session' in error_msg.lower() or 'chrome' in error_msg.lower() or 'driver' in error_msg.lower():
+            print("🔄 Marking bot for recreation on next request...")
+            with bot_lock:
+                try:
+                    if bot:
+                        bot.close()
+                except:
+                    pass
+                bot = None
+        
         return jsonify({
             'success': False,
             'error': error_msg,
             'prospect_id': data.get('prospect_id') if data else None,
+            'action_id': data.get('action_id') if data else None,
             'timestamp': datetime.now().isoformat()
         }), 500
 
