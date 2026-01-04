@@ -71,9 +71,17 @@ class LinkedInBot:
         options.add_argument('--disable-gpu')
         options.add_argument('--disable-software-rasterizer')
         
-        # Increase page load timeout settings
+        # Prevent page load hangs and timeouts
         options.add_argument('--disable-extensions')
         options.add_argument('--disable-infobars')
+        options.add_argument('--disable-background-timer-throttling')
+        options.add_argument('--disable-backgrounding-occluded-windows')
+        options.add_argument('--disable-renderer-backgrounding')
+        options.add_argument('--disable-features=TranslateUI')
+        options.add_argument('--disable-features=BlinkGenPropertyTrees')
+        
+        # Page loading strategy - don't wait for all resources
+        options.page_load_strategy = 'normal'  # or 'eager' for faster loads
         
         # Set realistic window size
         options.add_argument('--window-size=1920,1080')
@@ -176,41 +184,172 @@ class LinkedInBot:
         return True
     
     def check_login_status(self):
-        """Check if we're currently logged in"""
+        """
+        Check if we're currently logged in to LinkedIn
+        
+        Uses a two-step verification:
+        1. Check URL (quick check for redirects)
+        2. Verify logged-in UI elements exist
+        
+        Returns:
+            bool: True if logged in, False otherwise
+        """
         try:
-            current_url = self.driver.current_url
+            print("🔐 Checking login status...")
             
-            # Check if we're on a logged-in page
-            if any(path in current_url for path in ['feed', 'mynetwork', 'messaging', 'notifications', 'jobs']):
-                print("✅ Successfully logged in!")
-                self.logged_in = True
-                return True
+            # Step 1: Navigate to feed with timeout handling
+            print("📍 Navigating to LinkedIn feed...")
             
-            # Also check for LinkedIn navigation elements (indicates logged in)
             try:
-                # Look for the "Me" dropdown which only appears when logged in
-                me_button = self.driver.find_element(By.XPATH, "//button[contains(@class, 'global-nav__primary-link--me')]")
-                if me_button:
-                    print("✅ Successfully logged in!")
+                self.driver.get('https://www.linkedin.com/feed')
+            except Exception as e:
+                # Page load timeout - check if we can still interact
+                if 'timeout' in str(e).lower():
+                    print("⚠️  Page load timed out, checking if page is usable...")
+                    try:
+                        # Check if page loaded enough to be usable
+                        current_url = self.driver.current_url
+                        print(f"📍 Page partially loaded: {current_url}")
+                    except:
+                        print("❌ Page completely unresponsive")
+                        self.logged_in = False
+                        return False
+                else:
+                    raise
+            
+            # Wait for page to load and any redirects to complete
+            human_delay(3, 5)
+            
+            # Step 2: Check current URL (quick detection of redirects)
+            try:
+                current_url = self.driver.current_url
+                print(f"📍 Current URL: {current_url}")
+            except Exception as e:
+                print(f"❌ Cannot get current URL: {str(e)[:50]}")
+                self.logged_in = False
+                return False
+            
+            # Check if we got redirected to login page
+            if 'login' in current_url.lower() or '/uas/login' in current_url:
+                print("❌ Redirected to login page - not logged in")
+                self.logged_in = False
+                return False
+            
+            # Check if we're on a security checkpoint
+            if 'checkpoint' in current_url.lower():
+                print("⚠️  Security checkpoint detected - manual verification needed")
+                print("   Please complete the verification in the browser window")
+                self.logged_in = False
+                return False
+            
+            # Check if we're still on an auth-related page
+            if '/authwall' in current_url or '/signup' in current_url:
+                print("❌ On authentication page - not logged in")
+                self.logged_in = False
+                return False
+            
+            # Step 3: Verify we're on a logged-in page and elements are present
+            # Multiple methods to verify login status
+            
+            # Method 1: Check for the "Me" button (profile dropdown)
+            try:
+                print("  🔍 Looking for 'Me' button (profile menu)...")
+                me_button = WebDriverWait(self.driver, 10).until(
+                    EC.presence_of_element_located((
+                        By.XPATH, 
+                        "//button[contains(@class, 'global-nav__me') or contains(@aria-label, 'Me') or contains(@id, 'ember')]"
+                    ))
+                )
+                
+                if me_button and me_button.is_displayed():
+                    print("  ✅ Found 'Me' button - user is logged in!")
                     self.logged_in = True
                     return True
-            except:
-                pass
+                    
+            except TimeoutException:
+                print("  ⚠️  'Me' button not found, trying alternative checks...")
+            except Exception as e:
+                print(f"  ⚠️  Error checking 'Me' button: {str(e)[:50]}")
             
-            # If we're on linkedin.com root or /in/*, we might be logged in
-            if 'linkedin.com' in current_url and '/uas/login' not in current_url:
-                print("⚠️  Appears to be logged in (on LinkedIn domain)")
-                self.logged_in = True
-                return True
+            # Method 2: Look for navigation bar (backup check)
+            try:
+                print("  🔍 Looking for navigation bar...")
+                nav_bar = self.driver.find_element(
+                    By.XPATH,
+                    "//nav[contains(@class, 'global-nav')]"
+                )
+                
+                if nav_bar and nav_bar.is_displayed():
+                    print("  ✅ Found navigation bar - appears logged in!")
+                    self.logged_in = True
+                    return True
+                    
+            except NoSuchElementException:
+                print("  ⚠️  Navigation bar not found...")
+            except Exception as e:
+                print(f"  ⚠️  Error checking navigation: {str(e)[:50]}")
             
-            print(f"⚠️  Not logged in. Current URL: {current_url}")
+            # Method 3: Check for search bar (only visible when logged in)
+            try:
+                print("  🔍 Looking for search bar...")
+                search_bar = self.driver.find_element(
+                    By.XPATH,
+                    "//input[contains(@placeholder, 'Search') or contains(@aria-label, 'Search')]"
+                )
+                
+                if search_bar and search_bar.is_displayed():
+                    print("  ✅ Found search bar - user is logged in!")
+                    self.logged_in = True
+                    return True
+                    
+            except NoSuchElementException:
+                print("  ⚠️  Search bar not found...")
+            except Exception as e:
+                print(f"  ⚠️  Error checking search bar: {str(e)[:50]}")
+            
+            # Method 4: Check if we're on feed and can see posts
+            if 'feed' in current_url.lower():
+                try:
+                    print("  🔍 Checking for feed posts...")
+                    feed_posts = self.driver.find_elements(
+                        By.XPATH,
+                        "//div[contains(@class, 'feed-shared-update-v2')]"
+                    )
+                    
+                    if len(feed_posts) > 0:
+                        print(f"  ✅ Found {len(feed_posts)} feed posts - user is logged in!")
+                        self.logged_in = True
+                        return True
+                        
+                except Exception as e:
+                    print(f"  ⚠️  Error checking feed posts: {str(e)[:50]}")
+            
+            # If we got here, couldn't confirm login
+            print("❌ Could not verify login status - no logged-in elements found")
+            print(f"   Current URL: {current_url}")
+            print("   This usually means:")
+            print("   - Session expired")
+            print("   - Chrome profile doesn't have valid session")
+            print("   - Page not fully loaded")
+            print("   - Manual login required")
+            
             self.logged_in = False
             return False
             
         except Exception as e:
-            print(f"⚠️  Could not verify login status: {str(e)[:100]}")
+            error_msg = str(e)
+            print(f"❌ Error checking login status: {error_msg[:100]}")
+            
+            # Give more specific guidance based on error type
+            if 'timeout' in error_msg.lower():
+                print("   💡 Timeout error suggests:")
+                print("      - Chrome profile may be corrupted")
+                print("      - Network issues preventing LinkedIn from loading")
+                print("      - Try deleting chrome_bot_profile folder and re-logging in")
+            
             self.logged_in = False
             return False
+
     
     def manual_login_and_save_cookies(self):
         """
@@ -337,7 +476,13 @@ class LinkedInBot:
     def send_connection_request(self, profile_url, message):
         """
         Send a connection request with personalized note
-        Handles multiple scenarios: Connect, Follow, Message, Pending
+        
+        FLOW:
+        1. Navigate to profile
+        2. Detect current status (pending/connected/following)
+        3. If no status, try to connect (visible button or dropdown)
+        4. If can't connect, try to follow
+        5. Return appropriate result
         
         Args:
             profile_url: LinkedIn profile URL
@@ -361,59 +506,61 @@ class LinkedInBot:
             # Navigate to profile
             print("🌐 Navigating to profile...")
             self.driver.get(profile_url)
-            human_delay(5, 8)  # Increased wait for page load
+            human_delay(5, 8)
             
             # Scroll to load page content
             scroll_slowly(self.driver, 300)
-            human_delay(3, 5)  # Increased wait after scroll
+            human_delay(3, 5)
             
             # Wait for profile actions to be fully loaded
             print("⏳ Waiting for page to fully load...")
             try:
-                # Wait for any of the main action buttons to appear
                 WebDriverWait(self.driver, 15).until(
                     EC.presence_of_element_located((By.XPATH, "//button[contains(@class, 'pvs-profile-actions')]"))
                 )
-                human_delay(2, 3)  # Extra wait after elements appear
+                human_delay(2, 3)
             except TimeoutException:
                 print("  ⚠️  Page load took longer than expected, continuing anyway...")
             
-            # Check what action is available
+            # STEP 1: Check what action is available
             print("🔍 Analyzing available actions...")
             
-            # Try to find different buttons in order of preference
-            action_result = None
+            # Print all buttons for debugging
+            try:
+                all_buttons = self.driver.find_elements(By.TAG_NAME, 'button')
+                print(f"  🐛 DEBUG: Found {len(all_buttons)} total buttons on page")
+                
+                for i, btn in enumerate(all_buttons[:20]):
+                    try:
+                        btn_text = btn.text.strip() or btn.get_attribute('aria-label') or 'No text'
+                        print(f"  🐛 Button {i+1}: '{btn_text[:50]}'")
+                    except:
+                        continue
+            except Exception as e:
+                print(f"  ⚠️  Debug info failed: {str(e)[:50]}")
             
-            # 1. Try CONNECT button (best option)
-            action_result = self._try_connect_button(message)
-            if action_result:
-                return action_result
+            # STEP 2: FIRST check if there's already a status (pending/connected/following)
+            # This prevents trying to connect when we shouldn't
+            print("  📍 STEP 1: Checking existing relationship status...")
+            status_result = self._detect_relationship_status()
+            if status_result:
+                # Found existing status - return it
+                return status_result
             
-            # 2. Try FOLLOW button (if Connect not available)
-            action_result = self._try_follow_button()
-            if action_result:
-                return action_result
+            # STEP 3: No existing status - try to connect
+            print("  📍 STEP 2: No existing relationship - looking for Connect option...")
+            connect_result = self._try_connect_button(message)
+            if connect_result:
+                return connect_result
             
-            # 3. Check if PENDING (already sent request)
-            action_result = self._check_pending_status()
-            if action_result:
-                return action_result
+            # STEP 4: Can't connect - try to follow
+            print("  📍 STEP 3: Connect not available - trying Follow...")
+            follow_result = self._try_follow_button()
+            if follow_result:
+                return follow_result
             
-            # 4. Try MESSAGE button (already connected)
-            action_result = self._try_message_button(message)
-            if action_result:
-                return action_result
-            
-            # 5. Check if already connected (no action available)
-            if self._check_already_connected():
-                return {
-                    'success': True,
-                    'action_taken': 'already_connected',
-                    'message': 'Already connected to this person',
-                    'profile_url': profile_url
-                }
-            
-            # No action available
+            # STEP 5: No action available
+            print("  ❌ No action available on this profile")
             return {
                 'success': False,
                 'error': 'No action available - profile may be private or restricted',
@@ -428,6 +575,100 @@ class LinkedInBot:
                 'profile_url': profile_url
             }
     
+    def _detect_relationship_status(self):
+        """
+        Detect if there's already a relationship with this person
+        
+        Returns:
+            dict if status found (pending/connected/following), None if no status
+        """
+        try:
+            # Check for PENDING connection request
+            print("    🔍 Checking for Pending status...")
+            pending_selectors = [
+                "//button[contains(., 'Pending') or contains(@aria-label, 'Pending')]",
+                "//button[contains(@aria-label, 'withdraw')]",
+            ]
+            
+            for selector in pending_selectors:
+                try:
+                    elements = self.driver.find_elements(By.XPATH, selector)
+                    for element in elements:
+                        if element.is_displayed():
+                            element_text = element.text or element.get_attribute('aria-label') or ''
+                            print(f"    ✅ FOUND: Connection request already PENDING")
+                            print(f"    📝 Element text: '{element_text[:100]}'")
+                            
+                            return {
+                                'success': True,
+                                'action_taken': 'already_pending',
+                                'message': 'Connection request already pending',
+                                'profile_url': self.driver.current_url,
+                                'skip_reason': 'Connection request already sent and pending'
+                            }
+                except:
+                    continue
+            
+            # Check for ALREADY CONNECTED
+            print("    🔍 Checking for Already Connected status...")
+            # If Message button exists but NO Connect/Follow/Pending, they're connected
+            try:
+                message_btn = self.driver.find_elements(By.XPATH, "//button[normalize-space(.)='Message']")
+                connect_btn = self.driver.find_elements(By.XPATH, "//button[normalize-space(.)='Connect']")
+                follow_btn = self.driver.find_elements(By.XPATH, "//button[normalize-space(.)='Follow' or normalize-space(.)='Following']")
+                pending_btn = self.driver.find_elements(By.XPATH, "//button[contains(., 'Pending')]")
+                
+                has_message = any(btn.is_displayed() for btn in message_btn)
+                has_connect = any(btn.is_displayed() for btn in connect_btn)
+                has_follow = any(btn.is_displayed() for btn in follow_btn)
+                has_pending = any(btn.is_displayed() for btn in pending_btn)
+                
+                if has_message and not has_connect and not has_follow and not has_pending:
+                    print(f"    ✅ FOUND: Already CONNECTED (Message only, no Connect/Follow/Pending)")
+                    
+                    return {
+                        'success': True,
+                        'action_taken': 'already_connected',
+                        'message': 'Already connected to this person',
+                        'profile_url': self.driver.current_url,
+                        'skip_reason': 'Already in network'
+                    }
+            except:
+                pass
+            
+            # Check for FOLLOWING
+            print("    🔍 Checking for Following status...")
+            following_selectors = [
+                "//button[contains(., 'Following') or contains(@aria-label, 'Following')]",
+            ]
+            
+            for selector in following_selectors:
+                try:
+                    elements = self.driver.find_elements(By.XPATH, selector)
+                    for element in elements:
+                        if element.is_displayed():
+                            element_text = element.text or element.get_attribute('aria-label') or ''
+                            print(f"    ✅ FOUND: Already FOLLOWING this person")
+                            print(f"    📝 Element text: '{element_text[:100]}'")
+                            
+                            return {
+                                'success': True,
+                                'action_taken': 'already_following',
+                                'message': 'Already following this person',
+                                'profile_url': self.driver.current_url,
+                                'skip_reason': 'Already following (creator/influencer profile)'
+                            }
+                except:
+                    continue
+            
+            # No status found
+            print("    ℹ️  No existing relationship status detected")
+            return None
+            
+        except Exception as e:
+            print(f"    ⚠️  Error detecting status: {str(e)[:100]}")
+            return None
+    
     def _try_connect_button(self, message):
         """
         Try to click Connect button
@@ -435,40 +676,25 @@ class LinkedInBot:
         1. As a visible button on the profile (Pattern A)
         2. Hidden inside "More" dropdown (Pattern B)
         
-        We check BOTH locations!
+        Status has already been checked by caller - this only looks for Connect button
         """
         try:
             print("  🔎 Looking for 'Connect' option...")
             
-            # DEBUG: Print all buttons on page
-            try:
-                all_buttons = self.driver.find_elements(By.TAG_NAME, 'button')
-                print(f"  🐛 DEBUG: Found {len(all_buttons)} total buttons on page")
-                
-                # Print text of first 20 buttons for debugging
-                for i, btn in enumerate(all_buttons[:20]):
-                    try:
-                        btn_text = btn.text.strip() or btn.get_attribute('aria-label') or 'No text'
-                        print(f"  🐛 Button {i+1}: '{btn_text[:50]}'")
-                    except:
-                        continue
-            except Exception as e:
-                print(f"  ⚠️  Debug info failed: {str(e)[:50]}")
-            
             # STEP 1: Check for VISIBLE Connect button first (Pattern A)
-            print("  📍 Step 1: Checking for visible Connect button...")
+            print("    📍 Trying visible Connect button...")
             visible_connect = self._try_visible_connect_button(message)
             if visible_connect:
                 return visible_connect
             
-            # STEP 2: If no visible Connect, try More dropdown (Pattern B)
-            print("  📍 Step 2: No visible Connect button, checking More dropdown...")
+            # STEP 2: Try More dropdown (Pattern B)
+            print("    📍 Trying More dropdown...")
             dropdown_connect = self._try_connect_in_dropdown(message)
             if dropdown_connect:
                 return dropdown_connect
             
             # No Connect option found anywhere
-            print("  ❌ Connect option not found (visible or in dropdown)")
+            print("    ❌ Connect option not found (visible or in dropdown)")
             return None
                 
         except Exception as e:
@@ -476,59 +702,142 @@ class LinkedInBot:
             return None
     
     def _try_visible_connect_button(self, message):
-        """Check for Connect button that's directly visible on profile"""
+        """
+        Check for Connect button that's directly visible on the TARGET profile
+        
+        Strategy: Use simple selectors, then filter by position to avoid sidebar
+        """
         try:
-            # Look for visible Connect button (not in dropdown)
+            print("  📍 Step 1: Checking for visible Connect button ON TARGET PROFILE...")
+            
+            # SIMPLE selectors that find ANY Connect button, then we filter by position
             visible_connect_selectors = [
-                # Standard Connect button
-                "//main//button[.//span[text()='Connect']]",
-                "//section[contains(@class, 'pv-top-card')]//button[.//span[text()='Connect']]",
+                # Simple text match - finds all Connect buttons
+                "//button[normalize-space(.)='Connect']",
+                
                 # Aria label version
                 "//button[contains(@aria-label, 'Invite') and contains(@aria-label, 'to connect')]",
-                # Simple text match
-                "//button[normalize-space(.)='Connect' and not(ancestor::div[contains(@class, 'artdeco-dropdown')])]",
+                
+                # With span child
+                "//button[.//span[normalize-space()='Connect']]",
+                
+                # Connect button that's a sibling of Message
+                "//button[normalize-space(.)='Message']/following-sibling::button[normalize-space(.)='Connect']",
             ]
             
+            # Try each selector
             for i, selector in enumerate(visible_connect_selectors):
                 try:
                     print(f"  🔍 Trying visible Connect selector {i+1}/{len(visible_connect_selectors)}...")
-                    connect_btn = WebDriverWait(self.driver, 3).until(
-                        EC.element_to_be_clickable((By.XPATH, selector))
-                    )
                     
-                    if connect_btn and connect_btn.is_displayed():
-                        print(f"  ✅ Found VISIBLE Connect button!")
-                        connect_btn.click()
-                        human_delay(2, 3)
+                    # Find all matching buttons
+                    potential_buttons = self.driver.find_elements(By.XPATH, selector)
+                    
+                    print(f"    🐛 Found {len(potential_buttons)} potential Connect buttons with this selector")
+                    
+                    if len(potential_buttons) == 0:
+                        continue
+                    
+                    # NOW FILTER BY POSITION - this is the KEY part!
+                    connect_btn = None
+                    for btn_idx, btn in enumerate(potential_buttons):
+                        try:
+                            # Check if button is displayed
+                            if not btn.is_displayed():
+                                print(f"    ⚠️  Button {btn_idx+1} not displayed, skipping...")
+                                continue
+                            
+                            # Get button info for debugging
+                            btn_text = btn.text or btn.get_attribute('aria-label') or 'No text'
+                            
+                            # Get button position
+                            location = btn.location
+                            y_position = location['y']
+                            x_position = location['x']
+                            
+                            print(f"    🐛 Button {btn_idx+1}: text='{btn_text}', position: x={x_position}, y={y_position}")
+                            
+                            # CRITICAL FILTER: Profile Connect buttons are at TOP of page
+                            # Sidebar "More profiles for you" buttons are LOWER
+                            
+                            # Profile header is typically y < 600px
+                            # But let's be generous and allow up to y < 700px
+                            if y_position > 700:
+                                print(f"    ⚠️  Button too far down (y={y_position}), likely sidebar - SKIPPING")
+                                continue
+                            
+                            # Also check it's not too far right (sidebar is on right side)
+                            # Profile buttons are typically x < 800px
+                            if x_position > 1000:
+                                print(f"    ⚠️  Button too far right (x={x_position}), likely sidebar - SKIPPING")
+                                continue
+                            
+                            # Found a good candidate!
+                            connect_btn = btn
+                            print(f"    ✅ Found VALID Connect button at position x={x_position}, y={y_position}")
+                            break
+                            
+                        except Exception as e:
+                            print(f"    ⚠️  Error checking button {btn_idx+1}: {str(e)[:50]}")
+                            continue
+                    
+                    if not connect_btn:
+                        print(f"    ❌ No valid Connect button after position filtering")
+                        continue
+                    
+                    # Found the right button! Click it!
+                    print(f"  ✅ Found VISIBLE Connect button on TARGET PROFILE!")
+                    print(f"  🖱️  Clicking Connect button...")
+                    connect_btn.click()
+                    human_delay(2, 3)
+                    
+                    # Track whether message was actually sent
+                    message_actually_sent = False
+                    note_add_method = None
+                    
+                    # Try to add personalized note
+                    if message and len(message.strip()) > 0:
+                        note_result = self._add_connection_note(message)
                         
-                        # Try to add personalized note
-                        if message and len(message.strip()) > 0:
-                            if self._add_connection_note(message):
-                                print("  ✅ Added personalized note")
-                            else:
-                                print("  ⚠️  Couldn't add note, sending without message")
-                        
-                        # Click Send
-                        if self._click_send_button():
-                            print("✅ Connection request sent successfully!")
-                            return {
-                                'success': True,
-                                'action_taken': 'connection_request',
-                                'profile_url': self.driver.current_url,
-                                'message_sent': bool(message)
-                            }
-                        
+                        if note_result['success']:
+                            print(f"  ✅ Added personalized note (method: {note_result['method']})")
+                            message_actually_sent = True
+                            note_add_method = note_result['method']
+                        else:
+                            print(f"  ⚠️  Failed to add note: {note_result['error']}")
+                            print("  ⚠️  Sending connection request WITHOUT personalized message")
+                            message_actually_sent = False
+                    else:
+                        print("  ℹ️  No message provided, sending connection without note")
+                    
+                    # Click Send button (pass whether note was added)
+                    if self._click_send_button(note_was_added=message_actually_sent):
+                        print("✅ Connection request sent successfully!")
+                        return {
+                            'success': True,
+                            'action_taken': 'connection_request',
+                            'profile_url': self.driver.current_url,
+                            'message_sent': message_actually_sent,
+                            'note_method': note_add_method,
+                            'message_provided': bool(message and len(message.strip()) > 0)
+                        }
+                    
                 except TimeoutException:
+                    print(f"  ❌ Selector {i+1} timed out")
                     continue
                 except Exception as e:
-                    print(f"  ⚠️  Selector {i+1} error: {str(e)[:50]}")
+                    print(f"  ⚠️  Selector {i+1} error: {str(e)[:100]}")
                     continue
             
-            print("  ℹ️  No visible Connect button found")
+            print("  ℹ️  No visible Connect button found on target profile")
+            print("  💡 This usually means:")
+            print("     - Connect is in the More dropdown (will try that next)")
+            print("     - Already connected to this person")
+            print("     - This is a creator/influencer (Follow only)")
             return None
             
         except Exception as e:
-            print(f"  ⚠️  Error checking visible Connect: {str(e)[:50]}")
+            print(f"  ❌ Error checking visible Connect: {str(e)[:100]}")
             return None
     
     def _try_connect_in_dropdown(self, message):
@@ -692,20 +1001,33 @@ class LinkedInBot:
             human_delay(2, 3)
             
             # Try to add personalized note
-            if message and len(message.strip()) > 0:
-                if self._add_connection_note(message):
-                    print("  ✅ Added personalized note")
-                else:
-                    print("  ⚠️  Couldn't add note, sending without message")
+            message_actually_sent = False
+            note_add_method = None
             
-            # Click Send
-            if self._click_send_button():
+            if message and len(message.strip()) > 0:
+                note_result = self._add_connection_note(message)
+                
+                if note_result['success']:
+                    print(f"  ✅ Added personalized note (method: {note_result['method']})")
+                    message_actually_sent = True
+                    note_add_method = note_result['method']
+                else:
+                    print(f"  ⚠️  Failed to add note: {note_result['error']}")
+                    print("  ⚠️  Sending connection request WITHOUT personalized message")
+                    message_actually_sent = False
+            else:
+                print("  ℹ️  No message provided, sending connection without note")
+            
+            # Click Send (pass whether note was added)
+            if self._click_send_button(note_was_added=message_actually_sent):
                 print("✅ Connection request sent successfully!")
                 return {
                     'success': True,
                     'action_taken': 'connection_request',
                     'profile_url': self.driver.current_url,
-                    'message_sent': bool(message)
+                    'message_sent': message_actually_sent,  # ACCURATE status!
+                    'note_method': note_add_method,
+                    'message_provided': bool(message and len(message.strip()) > 0)
                 }
             else:
                 return {
@@ -760,159 +1082,324 @@ class LinkedInBot:
             print(f"  ❌ Error with Follow button: {str(e)}")
             return None
     
-    def _check_pending_status(self):
-        """Check if connection request is already pending"""
-        try:
-            print("  🔎 Checking for pending status...")
-            
-            pending_selectors = [
-                "//button[.//span[text()='Pending']]",
-                "//button[contains(@aria-label, 'Pending')]",
-                "//span[contains(text(), 'Pending')]",
-            ]
-            
-            for selector in pending_selectors:
-                try:
-                    pending_element = self.driver.find_element(By.XPATH, selector)
-                    if pending_element:
-                        print("  ℹ️  Connection request already pending")
-                        return {
-                            'success': True,
-                            'action_taken': 'already_pending',
-                            'message': 'Connection request already sent (pending)',
-                            'profile_url': self.driver.current_url
-                        }
-                except NoSuchElementException:
-                    continue
-            
-            print("  ❌ Not pending")
-            return None
-                
-        except Exception as e:
-            print(f"  ❌ Error checking pending: {str(e)}")
-            return None
+    def _add_connection_note(self, message):
+        """
+        Add personalized note to connection request
+        
+        ROBUST VERSION with multiple strategies and detailed verification
+        
+        Returns:
+            dict: {
+                'success': bool - Whether note was successfully added
+                'method': str - Which method succeeded
+                'error': str - Error message if failed
+            }
+        """
+        print(f"  📝 Attempting to add connection note ({len(message)} characters)...")
+        
+        # Verify we have a valid message
+        if not message or len(message.strip()) == 0:
+            return {
+                'success': False,
+                'method': None,
+                'error': 'No message provided'
+            }
+        
+        # Check message length (LinkedIn limit is 300 characters)
+        if len(message) > 300:
+            print(f"  ⚠️  Message too long ({len(message)} chars), truncating to 300...")
+            message = message[:297] + "..."
+        
+        # Strategy 1: Click "Add a note" button to expand text area
+        result = self._strategy_click_add_note_button(message)
+        if result['success']:
+            return result
+        
+        # Strategy 2: Look for already-visible text area (sometimes it's pre-expanded)
+        result = self._strategy_find_visible_textarea(message)
+        if result['success']:
+            return result
+        
+        # Strategy 3: Try alternative button selectors
+        result = self._strategy_alternative_add_note_button(message)
+        if result['success']:
+            return result
+        
+        # All strategies failed
+        print("  ❌ All strategies to add note failed")
+        return {
+            'success': False,
+            'method': None,
+            'error': 'All note-adding strategies failed'
+        }
     
-    def _try_message_button(self, message_text):
-        """Try to send a message (if already connected)"""
+    def _strategy_click_add_note_button(self, message):
+        """Strategy 1: Click 'Add a note' button"""
         try:
-            print("  🔎 Looking for 'Message' button...")
+            print("    🔍 Strategy 1: Looking for 'Add a note' button...")
             
-            message_selectors = [
-                "//button[.//span[text()='Message']]",
-                "//button[contains(@aria-label, 'Message')]",
-                "//a[contains(@href, '/messaging/')]",
+            # Multiple selectors for the "Add a note" button
+            add_note_selectors = [
+                "//button[contains(text(), 'Add a note')]",
+                "//button[@aria-label='Add a note']",
+                "//button[contains(@class, 'add-note')]",
+                "//button[.//span[contains(text(), 'Add a note')]]",
+                "//a[contains(text(), 'Add a note')]",  # Sometimes it's a link
             ]
             
-            message_button = None
-            for selector in message_selectors:
+            add_note_button = None
+            for i, selector in enumerate(add_note_selectors):
                 try:
-                    message_button = WebDriverWait(self.driver, 3).until(
+                    add_note_button = WebDriverWait(self.driver, 3).until(
                         EC.element_to_be_clickable((By.XPATH, selector))
                     )
-                    if message_button:
+                    if add_note_button and add_note_button.is_displayed():
+                        print(f"    ✅ Found 'Add a note' button (selector {i+1})")
                         break
                 except TimeoutException:
                     continue
             
-            if not message_button:
-                print("  ❌ 'Message' button not found")
-                return None
+            if not add_note_button:
+                return {
+                    'success': False,
+                    'method': 'click_add_note_button',
+                    'error': 'Add a note button not found'
+                }
             
-            print("  ✅ Found 'Message' button (already connected)")
-            
-            # Don't actually send message for now - just report that we could
-            # In future, we can implement actual message sending here
-            
-            print("✅ Already connected - can send direct message!")
-            return {
-                'success': True,
-                'action_taken': 'already_connected',
-                'message': 'Already connected to this person - use messaging instead',
-                'profile_url': self.driver.current_url,
-                'can_message': True
-            }
-                
-        except Exception as e:
-            print(f"  ❌ Error with Message button: {str(e)}")
-            return None
-    
-    def _check_already_connected(self):
-        """Check if we're already connected (no action buttons)"""
-        try:
-            # Look for "Message" or other indicators of connection
-            indicators = [
-                "//span[contains(text(), 'You are connected')]",
-                "//div[contains(@class, 'pv-top-card--is-connected')]",
-            ]
-            
-            for selector in indicators:
-                try:
-                    element = self.driver.find_element(By.XPATH, selector)
-                    if element:
-                        return True
-                except NoSuchElementException:
-                    continue
-            
-            return False
-                
-        except:
-            return False
-    
-    def _add_connection_note(self, message):
-        """Add personalized note to connection request"""
-        try:
-            # Look for "Add a note" button
-            add_note_button = WebDriverWait(self.driver, 5).until(
-                EC.element_to_be_clickable((By.XPATH, "//button[contains(., 'Add a note')]"))
-            )
+            # Click the button
+            print("    🖱️  Clicking 'Add a note' button...")
             add_note_button.click()
             human_delay(1, 2)
             
-            # Find message textarea
-            message_field = WebDriverWait(self.driver, 5).until(
-                EC.presence_of_element_located((By.ID, 'custom-message'))
-            )
-            
-            # Clear and type message
-            message_field.clear()
-            human_delay(0.5, 1)
-            human_type(message_field, message)
-            human_delay(2, 3)
-            
-            return True
+            # Now find and fill the text area
+            return self._fill_message_textarea(message, 'click_add_note_button')
             
         except Exception as e:
-            print(f"    ⚠️  Could not add note: {str(e)}")
-            return False
+            return {
+                'success': False,
+                'method': 'click_add_note_button',
+                'error': str(e)[:100]
+            }
     
-    def _click_send_button(self):
-        """Click the Send/Send invitation button"""
+    def _strategy_find_visible_textarea(self, message):
+        """Strategy 2: Text area is already visible (no button click needed)"""
         try:
-            send_selectors = [
-                "//button[contains(@aria-label, 'Send') and not(contains(@aria-label, 'without'))]",
-                "//button[.//span[text()='Send']]",
-                "//button[contains(., 'Send now')]",
-                "//button[contains(., 'Send invitation')]",
+            print("    🔍 Strategy 2: Looking for already-visible text area...")
+            
+            return self._fill_message_textarea(message, 'visible_textarea')
+            
+        except Exception as e:
+            return {
+                'success': False,
+                'method': 'visible_textarea',
+                'error': str(e)[:100]
+            }
+    
+    def _strategy_alternative_add_note_button(self, message):
+        """Strategy 3: Try clicking anywhere in the note area to expand it"""
+        try:
+            print("    🔍 Strategy 3: Trying alternative expansion methods...")
+            
+            # Sometimes clicking on the container expands it
+            container_selectors = [
+                "//div[contains(@class, 'send-invite')]",
+                "//div[contains(@class, 'invitation-modal')]",
+                "//div[contains(text(), 'Add a note')]",
             ]
             
+            for selector in container_selectors:
+                try:
+                    container = self.driver.find_element(By.XPATH, selector)
+                    if container and container.is_displayed():
+                        print(f"    🖱️  Clicking container to expand...")
+                        container.click()
+                        human_delay(1, 2)
+                        
+                        # Try to fill text area
+                        result = self._fill_message_textarea(message, 'alternative_click')
+                        if result['success']:
+                            return result
+                except:
+                    continue
+            
+            return {
+                'success': False,
+                'method': 'alternative_click',
+                'error': 'Could not expand note area'
+            }
+            
+        except Exception as e:
+            return {
+                'success': False,
+                'method': 'alternative_click',
+                'error': str(e)[:100]
+            }
+    
+    def _fill_message_textarea(self, message, method_name):
+        """
+        Find and fill the message text area
+        
+        Args:
+            message: The message to type
+            method_name: Name of the strategy that called this
+            
+        Returns:
+            dict with success status
+        """
+        try:
+            print("    📝 Looking for message text area...")
+            
+            # Multiple selectors for the textarea
+            textarea_selectors = [
+                "//textarea[@id='custom-message']",
+                "//textarea[@name='message']",
+                "//textarea[contains(@placeholder, 'Add a note')]",
+                "//textarea[contains(@class, 'send-invite__custom-message')]",
+                "//textarea[contains(@aria-label, 'Add a note')]",
+                "//div[@role='textbox']",  # Sometimes it's a contenteditable div
+            ]
+            
+            message_field = None
+            for i, selector in enumerate(textarea_selectors):
+                try:
+                    message_field = WebDriverWait(self.driver, 3).until(
+                        EC.presence_of_element_located((By.XPATH, selector))
+                    )
+                    if message_field and message_field.is_displayed():
+                        print(f"    ✅ Found text area (selector {i+1})")
+                        break
+                except TimeoutException:
+                    continue
+            
+            if not message_field:
+                print("    ❌ Could not find message text area")
+                return {
+                    'success': False,
+                    'method': method_name,
+                    'error': 'Message text area not found after expansion'
+                }
+            
+            # Clear any existing text
+            print("    🧹 Clearing text area...")
+            message_field.clear()
+            human_delay(0.3, 0.7)
+            
+            # Type the message using human-like typing
+            print(f"    ⌨️  Typing message ({len(message)} characters)...")
+            human_type(message_field, message)
+            human_delay(1, 2)
+            
+            # Verify the message was typed correctly
+            typed_text = message_field.get_attribute('value')
+            if not typed_text:
+                # Try alternative attribute for contenteditable divs
+                typed_text = message_field.text
+            
+            if len(typed_text) < len(message) * 0.9:  # Allow 10% variance
+                print(f"    ⚠️  Warning: Only {len(typed_text)}/{len(message)} characters typed")
+            
+            print(f"    ✅ Successfully typed {len(typed_text)} characters")
+            
+            return {
+                'success': True,
+                'method': method_name,
+                'error': None
+            }
+            
+        except Exception as e:
+            error_msg = str(e)[:100]
+            print(f"    ❌ Error filling textarea: {error_msg}")
+            return {
+                'success': False,
+                'method': method_name,
+                'error': error_msg
+            }
+    
+    def _click_send_button(self, note_was_added=False):
+        """
+        Click the Send/Send invitation button
+        
+        Args:
+            note_was_added: Whether a note was successfully added
+            
+        Returns:
+            bool: True if successfully clicked Send, False otherwise
+        """
+        try:
+            print("    📤 Looking for Send button...")
+            
+            # If note was added, look for regular "Send" button
+            # If note was NOT added, we might need to click "Send without a note"
+            if note_was_added:
+                send_selectors = [
+                    "//button[contains(@aria-label, 'Send') and not(contains(@aria-label, 'without'))]",
+                    "//button[@aria-label='Send invitation']",
+                    "//button[.//span[text()='Send']]",
+                    "//button[contains(., 'Send now')]",
+                    "//button[text()='Send']",
+                ]
+            else:
+                # When no note, we might see "Send without a note" OR just "Send"
+                send_selectors = [
+                    "//button[contains(., 'Send without a note')]",
+                    "//button[contains(@aria-label, 'Send without')]",
+                    "//button[.//span[contains(text(), 'Send')]]",
+                    "//button[contains(@aria-label, 'Send')]",
+                    "//button[text()='Send']",
+                ]
+            
             send_button = None
-            for selector in send_selectors:
+            successful_selector = None
+            
+            for i, selector in enumerate(send_selectors):
                 try:
                     send_button = WebDriverWait(self.driver, 5).until(
                         EC.element_to_be_clickable((By.XPATH, selector))
                     )
-                    if send_button:
+                    if send_button and send_button.is_displayed():
+                        successful_selector = i + 1
+                        print(f"    ✅ Found Send button (selector {successful_selector})")
                         break
                 except TimeoutException:
                     continue
             
             if not send_button:
                 print("    ❌ Could not find Send button")
+                print("    💡 Possible reasons:")
+                print("       - Connection limit reached")
+                print("       - Modal closed unexpectedly")
+                print("       - Page changed")
                 return False
             
+            # Get button text for logging
+            button_text = send_button.text or send_button.get_attribute('aria-label') or 'Send'
+            print(f"    🖱️  Clicking '{button_text}' button...")
+            
             send_button.click()
-            human_delay(3, 5)
+            human_delay(2, 4)
+            
+            # Verify the modal closed (successful send)
+            try:
+                # Check if the invitation modal is still visible
+                modal = self.driver.find_element(
+                    By.XPATH,
+                    "//div[contains(@class, 'send-invite') or contains(@class, 'artdeco-modal')]"
+                )
+                if modal and modal.is_displayed():
+                    print("    ⚠️  Warning: Modal still visible after clicking Send")
+                    # Give it more time
+                    human_delay(2, 3)
+            except:
+                # Modal not found = good! It closed
+                pass
+            
+            print("    ✅ Send button clicked successfully")
             return True
+            
+        except Exception as e:
+            error_msg = str(e)[:100]
+            print(f"    ❌ Error clicking Send: {error_msg}")
+            return False
             
         except Exception as e:
             print(f"    ❌ Error clicking Send: {str(e)}")
